@@ -1,22 +1,13 @@
 package com.example.stream
 
-import cats.effect.{Async, Ref}
-import cats.implicits.{catsSyntaxApplicativeId, toFunctorOps}
+import cats.effect.Async
+import cats.implicits.catsSyntaxApplicativeId
 import com.example.model.{OrderId, OrderRow}
-import fs2.Stream
+import fs2.Pipe
 
 import scala.concurrent.duration.DurationInt
 
-trait OrderProcessor[F[_]] {
-  def process(
-      s: Stream[F, OrderRow],
-      f: OrderRow => F[Unit]
-  ): Stream[F, Unit]
-  // if needed, can be generalized into def process[T, R](
-  //      s: Stream[F, T],
-  //      f: T => F[R]
-  //  ): Stream[F, R]... which is basically a Pipe
-}
+trait OrderProcessor[F[_]] extends ((OrderRow => F[Unit]) => Pipe[F, OrderRow, Unit])
 
 object OrderProcessor {
 
@@ -30,20 +21,18 @@ object OrderProcessor {
     val Default: ProcessingStrategy = Concurrent.Default
   }
 
-  private def sequential[F[_]]: OrderProcessor[F] = new OrderProcessor[F] {
-    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream.evalMap(f)
+  def sequential[F[_]]: OrderProcessor[F] = new OrderProcessor[F] {
+    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+      _.evalMap(f)
   }
 
-  private def concurrent[F[_]: Async](
+  def concurrent[F[_]: Async](
       maxConcurrent: Int
   ): OrderProcessor[F] = new OrderProcessor[F] {
 
-    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream
-        .through(StreamOps.groupBy[F, OrderRow, OrderId](_.orderId.pure[F]))
-        .map { case (key, orderStream) =>
-          println(s"$key -> $orderStream")
+    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+      _.through(StreamOps.groupBy[F, OrderRow, OrderId](_.orderId.pure[F]))
+        .map { case (_, orderStream) =>
           orderStream
             .evalMap(f)
             .debounce(100.milliseconds)
