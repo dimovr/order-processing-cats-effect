@@ -95,6 +95,7 @@ class TransactionStreamSpec extends FixtureAsyncWordSpec with BaseIOSpec with Op
         }
       }
 
+      // what is the criteria for sameness ?
       "T3: process a case where the same message is delivered twice" in { fxt =>
         val ts = Instant.now
         val order = OrderRow(

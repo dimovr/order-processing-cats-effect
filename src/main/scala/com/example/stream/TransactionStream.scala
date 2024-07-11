@@ -43,12 +43,11 @@ final class TransactionStream[F[_]](
     case Some(updatedOrder) =>
       PreparedQueries(session).use { queries =>
         for {
-          // Get current known order state
           state <- stateManager.getOrderState(updatedOrder.orderId, queries)
           _ <- OrderFsm.toTransaction(state, updatedOrder) match {
-            case Some(txn) => tryUpdate(updatedOrder, txn)(queries)
-            case None => ().pure[F]
-          }
+                 case Some(txn) => tryUpdate(updatedOrder, txn)(queries)
+                 case None      => ().pure[F]
+               }
         } yield ()
       }
     case None => ().pure[F]

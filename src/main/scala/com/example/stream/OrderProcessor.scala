@@ -40,6 +40,9 @@ object OrderProcessor {
       mapRef: MapRef[F, OrderId, Option[Deferred[F, Unit]]]
   ): OrderProcessor[F] = new OrderProcessor[F] {
 
+    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
+      stream.parEvalMapUnordered(maxConcurrent)(withRef(f))
+
     private def withRef(f: OrderRow => F[Unit])(order: OrderRow): F[Unit] =
       for {
         maybeLock <- mapRef(order.orderId).get
@@ -50,9 +53,6 @@ object OrderProcessor {
         _ <- newLock.complete(())
         _ <- mapRef.unsetKey(order.orderId)
       } yield ()
-
-    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream.parEvalMapUnordered(maxConcurrent)(withRef(f))
   }
 
   private def concurrentOf[F[_]: Async](maxConcurrent: Int): F[OrderProcessor[F]] =
