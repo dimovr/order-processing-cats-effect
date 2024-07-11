@@ -50,11 +50,12 @@ final class TransactionStream[F[_]](
 
   private def tryUpdate(order: OrderRow, txn: TransactionRow)(queries: PreparedQueries[F]): F[Unit] =
     for {
-
+      sp <- queries.xa.savepoint
       _ <- queries.updateOrder.execute(order.filled *: order.orderId *: EmptyTuple)
       _ <- queries.insertTransaction.execute(txn)
-      _ <- performLongRunningOperation(txn).value.void.onError(
-            logger.error(_)(s"Got error when performing long running F!")
+      _ <- performLongRunningOperation(txn).value.void.handleErrorWith(
+            logger.error(_)(s"Got error when performing long running F!") *>
+              queries.xa.rollback(sp).void
           )
     } yield ()
 

@@ -260,6 +260,62 @@ class TransactionStreamSpec extends FixtureAsyncWordSpec with BaseIOSpec with Op
         }
       }
 
+      "T6.A: not update current records when long running IO fails; continue with the next" in { fxt =>
+        val ts = Instant.now
+        val order1 = OrderRow(
+          orderId = "example_id",
+          market = "btc_eur",
+          total = 0.8,
+          filled = 0,
+          createdAt = ts,
+          updatedAt = ts
+        )
+
+        val firstUpdate = order1.copy(filled = 0.8)
+
+        val order2 = order1.copy(orderId = "example_id_2", total = 1)
+        val secondUpdate = order2.copy(filled = 0.4)
+        val thirdUpdate = order2.copy(filled = 0.6)
+
+
+        val test = getResources(fxt, 100.millis).use { case Resources(stream, getO, getT, insertO, _) =>
+          for {
+            // establish state
+            _ <- stream.addNewOrder(order1, insertO)
+            _ <- stream.addNewOrder(order2, insertO)
+            // start the app
+            streamFiber <- stream.stream.compile.drain.start
+            // set the switch so that performLongRunningOperation fails the first time
+            _ <- stream.setSwitch(true)
+            // start processing by publishing the update
+            _       <- stream.publish(firstUpdate)
+            _       <- IO.sleep(5.seconds)
+            // set the switch so that performLongRunningOperation succeeds the second time
+            _ <- stream.setSwitch(false)
+            _       <- stream.publish(secondUpdate)
+            _       <- stream.publish(thirdUpdate)
+            _       <- IO.sleep(1.seconds)
+            _       <- streamFiber.cancel
+            results <- getResults(stream, getO, getT)
+          } yield results
+        }
+        test.map { case Result(counter, orders, transactions) =>
+          val updated1 = orders.find(_.orderId == order1.orderId).value
+          val txn1     = transactions.find(_.orderId == order1.orderId)
+
+          val updated2 = orders.find(_.orderId == order2.orderId).value
+          val txn2     = transactions.filter(_.orderId == order2.orderId)
+
+          counter shouldBe 2
+          updated1.filled shouldBe 0
+          txn1 shouldBe empty
+
+          updated2.filled shouldBe 0.6
+          txn2.size shouldBe 2
+          txn2.map(_.amount).sum shouldBe 0.6
+        }
+      }
+
       "T7: process current update on stream shutdown" in { fxt =>
         val ts = Instant.now
         val order = OrderRow(
