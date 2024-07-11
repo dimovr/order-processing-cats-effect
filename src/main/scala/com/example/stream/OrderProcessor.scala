@@ -21,25 +21,25 @@ object OrderProcessor {
     val Default: ProcessingStrategy = Concurrent.Default
   }
 
-  def sequential[F[_]]: OrderProcessor[F] = new OrderProcessor[F] {
-    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+  def sequential[F[_]]: OrderProcessor[F] = (f: OrderRow => F[Unit]) =>
       _.evalMap(f)
-  }
 
   def concurrent[F[_]: Async](
       maxConcurrent: Int
-  ): OrderProcessor[F] = new OrderProcessor[F] {
-
-    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+  ): OrderProcessor[F] = (f: OrderRow => F[Unit]) =>
       _.through(StreamOps.groupBy[F, OrderRow, OrderId](_.orderId.pure[F]))
         .map { case (_, orderStream) =>
           orderStream
             .evalMap(f)
             .debounce(100.milliseconds)
-        }
-        .parJoin(maxConcurrent)
+        }.parJoin(maxConcurrent)
 
-  }
+
+  // used only in test to demonstrate the difference with `concurrent`
+  def testConcurrent[F[_]: Async](
+      maxConcurrent: Int
+  ): OrderProcessor[F] = (f: OrderRow => F[Unit]) =>
+    _.parEvalMap(maxConcurrent)(f)
 
   def apply[F[_]: Async](ps: ProcessingStrategy): OrderProcessor[F] = ps match {
     case ProcessingStrategy.Sequential      => sequential[F]
