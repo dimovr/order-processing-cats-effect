@@ -1,6 +1,7 @@
 package com.example.stream
 
 import cats.data.EitherT
+import cats.effect.implicits._
 import cats.effect.{Ref, Resource}
 import cats.effect.kernel.Async
 import cats.effect.std.Queue
@@ -9,6 +10,9 @@ import org.typelevel.log4cats.Logger
 import cats.syntax.all._
 import com.example.model.{OrderRow, TransactionRow}
 import com.example.persistence.PreparedQueries
+import com.example.stream.OrderFsm.ProcessOrder
+import com.example.stream.OrderProcessor.ProcessingStrategy
+import org.typelevel.log4cats.syntax.LoggerInterpolator
 import skunk._
 
 import scala.concurrent.duration.FiniteDuration
@@ -19,53 +23,54 @@ final class TransactionStream[F[_]](
   orders: Queue[F, OrderRow],
   session: Resource[F, Session[F]],
   transactionCounter: Ref[F, Int], // updated if long IO succeeds
-  stateManager: StateManager[F]    // utility for state management
+  stateManager: StateManager[F],    // utility for state management
+  processor: OrderProcessor[F]
 )(implicit F: Async[F], logger: Logger[F]) {
 
-  def stream: Stream[F, Unit] = {
-    Stream
-      .fromQueueUnterminated(orders)
-      .evalMap(processUpdate)
-  }
+  val stream: Stream[F, Unit] =
+    Stream.fromQueueUnterminated(orders)
+      .through(processor(processUpdateWithCancellation))
+
+  // ensures the processing completes even if the fiber is canceled
+  private def processUpdateWithCancellation(order: OrderRow): F[Unit] =
+    processUpdate(order).onCancel(processUpdate(order))
 
   // Application should shut down on error,
   // If performLongRunningOperation fails, we don't want to insert/update the records
   // Transactions always have positive amount
-  // Order is executed if total == filled
-  private def processUpdate(updatedOrder: OrderRow): F[Unit] = {
-    PreparedQueries(session)
-      .use { queries =>
-        for {
-          // Get current known order state
-          state <- stateManager.getOrderState(updatedOrder, queries)
-          transaction = TransactionRow(state = state, updated = updatedOrder)
-          // parameters for order update
-          params = state.filled *: state.orderId *: EmptyTuple
-          // update order with params
-          _ <- queries.updateOrder.execute(params)
-          // insert the transaction
-          _ <- queries.insertTransaction.execute(transaction)
-          _ <- performLongRunningOperation(transaction).value.void.handleErrorWith(th =>
-                 logger.error(th)(s"Got error when performing long running IO!")
-               )
-        } yield ()
-      }
-  }
+  // Order is executed if total == filled todo: what does order execution represent exactly? updated + insertTxn
+  private def processUpdate(updatedOrder: OrderRow): F[Unit] =
+    PreparedQueries(session).use { queries =>
+      for {
+        state <- stateManager.getOrderState(updatedOrder.orderId, queries)
+        _ <- OrderFsm.check(state, updatedOrder) match {
+          case ProcessOrder(order, txn) => tryUpdate(order, txn)(queries)
+          case result => info"Order not updated due to: $result"
+        }
+      } yield ()
+    }
 
-  // represents some long running IO that can fail
-  private def performLongRunningOperation(transaction: TransactionRow): EitherT[F, Throwable, Unit] = {
+  private def tryUpdate(order: OrderRow, txn: TransactionRow)(queries: PreparedQueries[F]): F[Unit] =
+    for {
+      sp <- queries.xa.savepoint
+      _ <- queries.updateOrder.execute(order.filled *: order.orderId *: EmptyTuple)
+      _ <- queries.insertTransaction.execute(txn)
+      _ <- performLongRunningOperation(txn).value.void.handleErrorWith(
+            logger.error(_)(s"Got error when performing long running F!") *>
+              queries.xa.rollback(sp).void
+          )
+    } yield ()
+
+  // represents some long running effect that can fail
+  private def performLongRunningOperation(txn: TransactionRow): EitherT[F, Throwable, Unit] = {
     EitherT.liftF[F, Throwable, Unit](
       F.sleep(operationTimer) *>
         stateManager.getSwitch.flatMap {
           case false =>
-            transactionCounter
-              .updateAndGet(_ + 1)
-              .flatMap(count =>
-                logger.info(
-                  s"Updated counter to $count by transaction with amount ${transaction.amount} for order ${transaction.orderId}!"
-                )
-              )
-          case true => F.raiseError(throw new Exception("Long running IO failed!"))
+            transactionCounter.updateAndGet(_ + 1).flatMap(count =>
+              info"Updated counter to $count by transaction with amount ${txn.amount} for order ${txn.orderId}!"
+            )
+          case true => F.raiseError(new Exception("Long running F failed!"))
         }
     )
   }
@@ -82,19 +87,22 @@ object TransactionStream {
 
   def apply[F[_]: Async: Logger](
     operationTimer: FiniteDuration,
-    session: Resource[F, Session[F]]
+    session: Resource[F, Session[F]],
+    strategy: ProcessingStrategy = ProcessingStrategy.Default
   ): Resource[F, TransactionStream[F]] = {
     Resource.eval {
       for {
         counter      <- Ref.of(0)
         queue        <- Queue.unbounded[F, OrderRow]
         stateManager <- StateManager.apply
+        processor    = OrderProcessor(strategy)
       } yield new TransactionStream[F](
         operationTimer,
         queue,
         session,
         counter,
-        stateManager
+        stateManager,
+        processor
       )
     }
   }
