@@ -5,7 +5,7 @@ import java.util.UUID
 
 case class TransactionRow(
   id: UUID,
-  orderId: String, // the same as OrderRow
+  orderId: OrderId, // the same as OrderRow
   amount: BigDecimal,
   createdAt: Instant
 )

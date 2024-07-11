@@ -31,27 +31,29 @@ final class TransactionStream[F[_]](
   // Application should shut down on error,
   // If performLongRunningOperation fails, we don't want to insert/update the records
   // Transactions always have positive amount
-  // Order is executed if total == filled
-  private def processUpdate(updatedOrder: OrderRow): F[Unit] = {
-    PreparedQueries(session)
-      .use { queries =>
+  // Order is executed if total == filled todo: what does order execution represent exactly? updated + insertTxn
+  private def processUpdate(updatedOrder: OrderRow): F[Unit] = OrderFsm.ifPositive(updatedOrder) match {
+    case Some(updatedOrder) =>
+      PreparedQueries(session).use { queries =>
         for {
           // Get current known order state
           state <- stateManager.getOrderState(updatedOrder, queries)
-          transaction = TransactionRow(state = state, updated = updatedOrder)
-          // parameters for order update
-          params = updatedOrder.filled *: updatedOrder.orderId *: EmptyTuple
-          // update order with params
-          _ <- queries.updateOrder.execute(params)
-          // insert the transaction
-          _ <- queries.insertTransaction.execute(transaction)
-          _ <- performLongRunningOperation(transaction).value.void.handleErrorWith(th =>
-                 logger.error(th)(s"Got error when performing long running IO!")
-               )
+          _ <- OrderFsm.toTransaction(state, updatedOrder) match {
+            case Some(transaction) =>
+              for {
+                _ <- queries.updateOrder.execute(updatedOrder.filled *: updatedOrder.orderId *: EmptyTuple)
+                // insert the transaction
+                _ <- queries.insertTransaction.execute(transaction)
+                _ <- performLongRunningOperation(transaction).value.void.handleErrorWith(th =>
+                  logger.error(th)(s"Got error when performing long running IO!")
+                )
+              } yield ()
+            case None => ().pure[F]
+          }
         } yield ()
       }
+    case None => ().pure[F]
   }
-
   // represents some long running IO that can fail
   private def performLongRunningOperation(transaction: TransactionRow): EitherT[F, Throwable, Unit] = {
     EitherT.liftF[F, Throwable, Unit](
