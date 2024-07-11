@@ -1,6 +1,7 @@
 package com.example.stream
 
 import cats.data.EitherT
+import cats.effect.implicits.monadCancelOps_
 import cats.effect.{Ref, Resource}
 import cats.effect.kernel.Async
 import cats.effect.std.Queue
@@ -26,8 +27,12 @@ final class TransactionStream[F[_]](
   def stream: Stream[F, Unit] = {
     Stream
       .fromQueueUnterminated(orders)
-      .evalMap(processUpdate)
+      .evalMap(processUpdateWithCancellation)
   }
+
+  // ensures the processing completes even if the fiber is canceled
+  private def processUpdateWithCancellation(order: OrderRow): F[Unit] =
+    processUpdate(order).onCancel(processUpdate(order))
 
   // Application should shut down on error,
   // If performLongRunningOperation fails, we don't want to insert/update the records
