@@ -1,22 +1,13 @@
 package com.example.stream
 
-import cats.syntax.all._
-import cats.effect.std.MapRef
-import cats.effect.{Async, Concurrent, Deferred}
-import cats.implicits.toFunctorOps
+import cats.effect.Async
+import cats.implicits.catsSyntaxApplicativeId
 import com.example.model.{OrderId, OrderRow}
-import fs2.Stream
+import fs2.Pipe
 
-trait OrderProcessor[F[_]] {
-  def process(
-      s: Stream[F, OrderRow],
-      f: OrderRow => F[Unit]
-  ): Stream[F, Unit]
-  // if needed, can be generalized into def process[T, R](
-  //      s: Stream[F, T],
-  //      f: T => F[R]
-  //  ): Stream[F, R]... which is basically a Pipe
-}
+import scala.concurrent.duration.DurationInt
+
+trait OrderProcessor[F[_]] extends ((OrderRow => F[Unit]) => Pipe[F, OrderRow, Unit])
 
 object OrderProcessor {
 
@@ -30,39 +21,29 @@ object OrderProcessor {
     val Default: ProcessingStrategy = Concurrent.Default
   }
 
-  private def sequential[F[_]]: OrderProcessor[F] = new OrderProcessor[F] {
-    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream.evalMap(f)
+  def sequential[F[_]]: OrderProcessor[F] = new OrderProcessor[F] {
+    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+      _.evalMap(f)
   }
 
-  private def concurrent[F[_]: Concurrent](
-      maxConcurrent: Int,
-      mapRef: MapRef[F, OrderId, Option[Deferred[F, Unit]]]
+  def concurrent[F[_]: Async](
+      maxConcurrent: Int
   ): OrderProcessor[F] = new OrderProcessor[F] {
 
-    override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream.parEvalMapUnordered(maxConcurrent)(withRef(f))
+    override def apply(f: OrderRow => F[Unit]): Pipe[F, OrderRow, Unit] =
+      _.through(StreamOps.groupBy[F, OrderRow, OrderId](_.orderId.pure[F]))
+        .map { case (_, orderStream) =>
+          orderStream
+            .evalMap(f)
+            .debounce(100.milliseconds)
+        }
+        .parJoin(maxConcurrent)
 
-    private def withRef(f: OrderRow => F[Unit])(order: OrderRow): F[Unit] =
-      for {
-        maybeLock <- mapRef(order.orderId).get
-        _ <- maybeLock.traverse_(_.get)
-        newLock <- Deferred[F, Unit]
-        _ <- mapRef.setKeyValue(order.orderId, newLock)
-        _ <- f(order)
-        _ <- newLock.complete(())
-        _ <- mapRef.unsetKey(order.orderId)
-      } yield ()
   }
 
-  private def concurrentOf[F[_]: Async](maxConcurrent: Int): F[OrderProcessor[F]] =
-    MapRef.ofConcurrentHashMap[F, String, Deferred[F, Unit]]().map { ref =>
-      concurrent[F](maxConcurrent, ref)
-    }
-
-  def of[F[_]: Async](ps: ProcessingStrategy): F[OrderProcessor[F]] = ps match {
-    case ProcessingStrategy.Sequential      => sequential[F].pure[F]
-    case ProcessingStrategy.Concurrent(max) => concurrentOf[F](max)
+  def apply[F[_]: Async](ps: ProcessingStrategy): OrderProcessor[F] = ps match {
+    case ProcessingStrategy.Sequential      => sequential[F]
+    case ProcessingStrategy.Concurrent(max) => concurrent[F](max)
   }
 
 }

@@ -27,10 +27,9 @@ final class TransactionStream[F[_]](
   processor: OrderProcessor[F]
 )(implicit F: Async[F], logger: Logger[F]) {
 
-  val stream: Stream[F, Unit] = processor.process(
-    Stream.fromQueueUnterminated(orders),
-    processUpdateWithCancellation
-  )
+  val stream: Stream[F, Unit] =
+    Stream.fromQueueUnterminated(orders)
+      .through(processor(processUpdateWithCancellation))
 
   // ensures the processing completes even if the fiber is canceled
   private def processUpdateWithCancellation(order: OrderRow): F[Unit] =
@@ -96,7 +95,7 @@ object TransactionStream {
         counter      <- Ref.of(0)
         queue        <- Queue.unbounded[F, OrderRow]
         stateManager <- StateManager.apply
-        processor    <- OrderProcessor.of(strategy)
+        processor    = OrderProcessor(strategy)
       } yield new TransactionStream[F](
         operationTimer,
         queue,
