@@ -18,18 +18,13 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
 
   implicit override def executionContext: ExecutionContext = ExecutionContext.global
 
-  case class MaxTracker(current: Int, max: Int) {
-    def update(newValue: Int): MaxTracker =
-      MaxTracker(newValue, math.max(max, newValue))
-  }
-
   "OrderProcessor" should {
 
     "process orders sequentially" in {
       for {
-        processor <- OrderProcessor.of[IO](OrderProcessor.ProcessingStrategy.Sequential)
         processedOrders <- Ref[IO].of(Vector.empty[OrderRow])
         processOrder = (order: OrderRow) => IO.sleep(10.millis) *> processedOrders.update(_ :+ order)
+        processor = OrderProcessor[IO](OrderProcessor.ProcessingStrategy.Sequential)
         orders = List(
           OrderRow("1", "btc_eur", 50, 10, Instant.now, Instant.now),
           OrderRow("2", "btc_eur", 50, 20, Instant.now, Instant.now),
@@ -46,9 +41,9 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
 
     "process orders concurrently but maintain order for same orderId" in {
       for {
-        processor <- OrderProcessor.of[IO](OrderProcessor.ProcessingStrategy.Concurrent(3))
         processedOrders <- Ref[IO].of(Vector.empty[OrderRow])
         currentlyProcessing <- Ref[IO].of(Set.empty[String])
+        processor = OrderProcessor[IO](OrderProcessor.ProcessingStrategy.Concurrent(3))
         processOrder = (order: OrderRow) =>
           for {
             _ <- currentlyProcessing.update(_ + order.orderId)
@@ -88,10 +83,10 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
       val maxConcurrent = 10
 
       for {
-        processor <- OrderProcessor.of[IO](OrderProcessor.ProcessingStrategy.Concurrent(maxConcurrent))
         processedOrders <- Ref[IO].of(Vector.empty[OrderRow])
         activeOrders <- Ref[IO].of(Set.empty[OrderRow])
         maxConcurrentRef <- Ref[IO].of(0)
+        processor = OrderProcessor[IO](OrderProcessor.ProcessingStrategy.Concurrent(maxConcurrent))
         processOrder = (order: OrderRow) =>
           for {
             _ <- activeOrders.update(_ + order)

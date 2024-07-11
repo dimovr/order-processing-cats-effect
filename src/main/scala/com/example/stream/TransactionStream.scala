@@ -96,7 +96,7 @@ object TransactionStream {
         counter      <- Ref.of(0)
         queue        <- Queue.unbounded[F, OrderRow]
         stateManager <- StateManager.apply
-        processor    <- OrderProcessor.of(strategy)
+        processor    = OrderProcessor[F](strategy)
       } yield new TransactionStream[F](
         operationTimer,
         queue,
