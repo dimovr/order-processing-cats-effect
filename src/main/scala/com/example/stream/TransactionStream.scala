@@ -1,11 +1,14 @@
 package com.example.stream
 
+import cats.effect.Deferred
+import cats.effect.std.MapRef
+import com.example.model.OrderId
 import cats.data.EitherT
 import cats.effect.implicits.monadCancelOps_
 import cats.effect.{Ref, Resource}
 import cats.effect.kernel.Async
 import cats.effect.std.Queue
-import fs2.Stream
+import fs2.{Pipe, Stream}
 import org.typelevel.log4cats.Logger
 import cats.syntax.all._
 import com.example.model.{OrderRow, TransactionRow}
@@ -21,14 +24,28 @@ final class TransactionStream[F[_]](
   orders: Queue[F, OrderRow],
   session: Resource[F, Session[F]],
   transactionCounter: Ref[F, Int], // updated if long IO succeeds
-  stateManager: StateManager[F]    // utility for state management
+  stateManager: StateManager[F],    // utility for state management
+  mapRef: MapRef[F, OrderId, Option[Deferred[F, Unit]]],
+  maxConcurrent: Int = 10
 )(implicit F: Async[F], logger: Logger[F]) {
 
-  def stream: Stream[F, Unit] = {
-    Stream
-      .fromQueueUnterminated(orders)
-      .evalMap(processUpdateWithCancellation)
-  }
+  private val processConcurrently: Pipe[F, OrderRow, Unit] =
+    _.parEvalMapUnordered(maxConcurrent)(withRef)
+
+  val stream: Stream[F, Unit] =
+      Stream.fromQueueUnterminated(orders)
+        .through(processConcurrently)
+
+  private def withRef(order: OrderRow): F[Unit] =
+    for {
+      maybeLock <- mapRef(order.orderId).get
+      _ <- maybeLock.traverse_(_.get)
+      newLock <- Deferred[F, Unit]
+      _ <- mapRef.setKeyValue(order.orderId, newLock)
+      _ <- processUpdateWithCancellation(order)
+      _ <- newLock.complete(())
+      _ <- mapRef.unsetKey(order.orderId)
+    } yield ()
 
   // ensures the processing completes even if the fiber is canceled
   private def processUpdateWithCancellation(order: OrderRow): F[Unit] =
@@ -98,12 +115,14 @@ object TransactionStream {
         counter      <- Ref.of(0)
         queue        <- Queue.unbounded[F, OrderRow]
         stateManager <- StateManager.apply
+        mapRef <- MapRef.ofConcurrentHashMap[F, String, Deferred[F, Unit]]()
       } yield new TransactionStream[F](
         operationTimer,
         queue,
         session,
         counter,
-        stateManager
+        stateManager,
+        mapRef
       )
     }
   }
