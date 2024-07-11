@@ -10,17 +10,10 @@ object OrderFsm {
   case object SmallerOrder extends OrderProcessingResult
   case class ProcessOrder(order: OrderRow, txn: TransactionRow) extends OrderProcessingResult
 
-  def check(existing: OrderRow, incoming: OrderRow): OrderProcessingResult = {
-    println(s"${existing.filled} -> ${incoming.filled}")
-    if (existing.filled == existing.total)
-      FilledOrder
-    else if (incoming.filled <= 0)
-      NonPositiveOrder
-    else if (existing.filled > incoming.filled)
-      SmallerOrder
-    else {
-      ProcessOrder(incoming, TransactionRow(existing, incoming))
-    }
-  }
+  def check(existing: OrderRow, incoming: OrderRow): OrderProcessingResult =
+    if (existing.filled == existing.total) FilledOrder
+    else if (incoming.filled <= 0) NonPositiveOrder
+    else if (existing.filled > incoming.filled) SmallerOrder
+    else ProcessOrder(incoming, TransactionRow(existing, incoming))
 
 }

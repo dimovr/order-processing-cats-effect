@@ -473,6 +473,44 @@ class TransactionStreamSpec extends FixtureAsyncWordSpec with BaseIOSpec with Op
         }
       }
     }
+
+    "T10.A: handle race condition where bigger update arrives first but not fully filled" in { fxt =>
+      val ts = Instant.now
+      val order = OrderRow(
+        orderId = "example_id",
+        market = "btc_eur",
+        total = 0.8,
+        filled = 0,
+        createdAt = ts,
+        updatedAt = ts
+      )
+
+      val firstUpdate = order.copy(filled = 0.7)
+
+      val secondUpdate = order.copy(filled = 0.5)
+
+      val test = getResources(fxt, 100.millis).use { case Resources(stream, getO, getT, insertO, _) =>
+        for {
+          _           <- stream.addNewOrder(order, insertO)
+          streamFiber <- stream.stream.compile.drain.start
+          // Hint: we can treat it as one big transaction, instead of splitting into two
+          _       <- stream.publish(firstUpdate)
+          _       <- stream.publish(secondUpdate)
+          _       <- IO.sleep(5.seconds)
+          _       <- streamFiber.cancel
+          results <- getResults(stream, getO, getT)
+        } yield results
+      }
+      test.map { case Result(counter, orders, transactions) =>
+        val updated = orders.find(_.orderId == order.orderId).value
+        val txn     = transactions.filter(_.orderId == order.orderId)
+
+        counter shouldBe 2
+        updated.filled shouldBe 0.7
+        txn.size shouldBe 2
+        txn.map(_.amount).sum shouldBe 0.7
+      }
+    }
   }
 
   // timer for long IO operation
