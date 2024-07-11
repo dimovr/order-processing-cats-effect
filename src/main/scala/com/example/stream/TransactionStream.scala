@@ -2,13 +2,13 @@ package com.example.stream
 
 import cats.data.EitherT
 import cats.effect.implicits._
-import cats.effect.{Deferred, Ref, Resource}
+import cats.effect.{Ref, Resource}
 import cats.effect.kernel.Async
-import cats.effect.std.{MapRef, Queue}
+import cats.effect.std.Queue
 import fs2.Stream
 import org.typelevel.log4cats.Logger
 import cats.syntax.all._
-import com.example.model.{OrderId, OrderRow, TransactionRow}
+import com.example.model.{OrderRow, TransactionRow}
 import com.example.persistence.PreparedQueries
 import com.example.stream.OrderProcessor.ProcessingStrategy
 import org.typelevel.log4cats.syntax.LoggerInterpolator
@@ -84,7 +84,6 @@ final class TransactionStream[F[_]](
   def setSwitch(value: Boolean): F[Unit]                                          = stateManager.setSwitch(value)
   def addNewOrder(order: OrderRow, insert: PreparedCommand[F, OrderRow]): F[Unit] = stateManager.add(order, insert)
   // helper methods for testing
-
 }
 
 object TransactionStream {

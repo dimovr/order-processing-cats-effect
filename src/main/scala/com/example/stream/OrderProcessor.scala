@@ -41,7 +41,7 @@ object OrderProcessor {
   ): OrderProcessor[F] = new OrderProcessor[F] {
 
     override def process(stream: Stream[F, OrderRow], f: OrderRow => F[Unit]): Stream[F, Unit] =
-      stream.parEvalMap(maxConcurrent)(withRef(f))
+      stream.parEvalMapUnordered(maxConcurrent)(withRef(f))
 
     private def withRef(f: OrderRow => F[Unit])(order: OrderRow): F[Unit] =
       for {

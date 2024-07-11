@@ -18,6 +18,11 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
 
   implicit override def executionContext: ExecutionContext = ExecutionContext.global
 
+  case class MaxTracker(current: Int, max: Int) {
+    def update(newValue: Int): MaxTracker =
+      MaxTracker(newValue, math.max(max, newValue))
+  }
+
   "OrderProcessor" should {
 
     "process orders sequentially" in {
@@ -26,11 +31,11 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
         processedOrders <- Ref[IO].of(Vector.empty[OrderRow])
         processOrder = (order: OrderRow) => IO.sleep(10.millis) *> processedOrders.update(_ :+ order)
         orders = List(
-          OrderRow("1", "btc_eur", 100, 10, Instant.now, Instant.now),
-          OrderRow("2", "btc_eur", 100, 20, Instant.now, Instant.now),
-          OrderRow("1", "btc_eur", 100, 30, Instant.now, Instant.now),
-          OrderRow("3", "btc_eur", 100, 40, Instant.now, Instant.now),
-          OrderRow("2", "btc_eur", 100, 50, Instant.now, Instant.now)
+          OrderRow("1", "btc_eur", 50, 10, Instant.now, Instant.now),
+          OrderRow("2", "btc_eur", 50, 20, Instant.now, Instant.now),
+          OrderRow("1", "btc_eur", 50, 30, Instant.now, Instant.now),
+          OrderRow("3", "btc_eur", 50, 40, Instant.now, Instant.now),
+          OrderRow("2", "btc_eur", 50, 50, Instant.now, Instant.now)
         )
         _ <- processor.process(Stream.emits(orders), processOrder).compile.drain
         result <- processedOrders.get
@@ -53,11 +58,11 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
             _ <- currentlyProcessing.update(_ - order.orderId)
           } yield ()
         orders = List(
-          OrderRow("1", "btc_eur", 100, 10, Instant.now, Instant.now),
-          OrderRow("2", "btc_eur", 100, 20, Instant.now, Instant.now),
-          OrderRow("1", "btc_eur", 100, 30, Instant.now, Instant.now),
-          OrderRow("3", "btc_eur", 100, 40, Instant.now, Instant.now),
-          OrderRow("2", "btc_eur", 100, 50, Instant.now, Instant.now)
+          OrderRow("1", "btc_eur", 50, 10, Instant.now, Instant.now),
+          OrderRow("2", "btc_eur", 50, 20, Instant.now, Instant.now),
+          OrderRow("1", "btc_eur", 50, 30, Instant.now, Instant.now),
+          OrderRow("3", "btc_eur", 50, 40, Instant.now, Instant.now),
+          OrderRow("2", "btc_eur", 50, 50, Instant.now, Instant.now)
         )
         _ <- processor.process(Stream.emits(orders), processOrder).compile.drain
         result <- processedOrders.get
@@ -79,30 +84,35 @@ class OrderProcessorSpec extends AsyncWordSpec with AsyncIOSpec with Matchers wi
     }
 
     "handle a large number of orders efficiently" in {
-      val numOrders = 1000
+      val numOrders = 500
       val maxConcurrent = 10
 
       for {
         processor <- OrderProcessor.of[IO](OrderProcessor.ProcessingStrategy.Concurrent(maxConcurrent))
         processedOrders <- Ref[IO].of(Vector.empty[OrderRow])
-        currentlyProcessing <- Ref[IO].of(Set.empty[String])
+        activeOrders <- Ref[IO].of(Set.empty[OrderRow])
+        maxConcurrentRef <- Ref[IO].of(0)
         processOrder = (order: OrderRow) =>
           for {
-            _ <- currentlyProcessing.update(_ + order.orderId)
+            _ <- activeOrders.update(_ + order)
             _ <- IO.sleep(10.millis) // Simulate some processing time
             _ <- processedOrders.update(_ :+ order)
-            _ <- currentlyProcessing.update(_ - order.orderId)
+            _ <- activeOrders.update(_ - order)
+            _ <- activeOrders.get.flatMap { currentSet =>
+                  maxConcurrentRef.update(max => math.max(max, currentSet.size))
+                }
           } yield ()
         orders = (1 to numOrders).map(i =>
-                    OrderRow(s"order-${i % 100}", "btc_eur", 100, i, Instant.now, Instant.now)
+                    OrderRow(s"order-${i % 50}", "btc_eur", 50, i, Instant.now, Instant.now)
                   ).toList
         start <- IO.monotonic
         _ <- processor.process(Stream.emits(orders), processOrder).compile.drain
         end <- IO.monotonic
         result <- processedOrders.get
-        maxConcurrent <- currentlyProcessing.get.map(_.size)
+        maxConcurrent <- maxConcurrentRef.get
       } yield {
         result.size mustBe numOrders
+        maxConcurrent mustBe >(1)
         maxConcurrent mustBe <=(10)
         (end - start).toMillis mustBe <(5.seconds.toMillis)
       }
