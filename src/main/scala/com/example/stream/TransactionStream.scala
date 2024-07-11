@@ -10,6 +10,7 @@ import org.typelevel.log4cats.Logger
 import cats.syntax.all._
 import com.example.model.{OrderRow, TransactionRow}
 import com.example.persistence.PreparedQueries
+import com.example.stream.OrderFsm.ProcessOrder
 import com.example.stream.OrderProcessor.ProcessingStrategy
 import org.typelevel.log4cats.syntax.LoggerInterpolator
 import skunk._
@@ -39,19 +40,16 @@ final class TransactionStream[F[_]](
   // If performLongRunningOperation fails, we don't want to insert/update the records
   // Transactions always have positive amount
   // Order is executed if total == filled todo: what does order execution represent exactly? updated + insertTxn
-  private def processUpdate(updatedOrder: OrderRow): F[Unit] = OrderFsm.ifPositive(updatedOrder) match {
-    case Some(updatedOrder) =>
-      PreparedQueries(session).use { queries =>
-        for {
-          state <- stateManager.getOrderState(updatedOrder.orderId, queries)
-          _ <- OrderFsm.toTransaction(state, updatedOrder) match {
-                 case Some(txn) => tryUpdate(updatedOrder, txn)(queries)
-                 case None      => ().pure[F]
-               }
-        } yield ()
-      }
-    case None => ().pure[F]
-  }
+  private def processUpdate(updatedOrder: OrderRow): F[Unit] =
+    PreparedQueries(session).use { queries =>
+      for {
+        state <- stateManager.getOrderState(updatedOrder.orderId, queries)
+        _ <- OrderFsm.check(state, updatedOrder) match {
+          case ProcessOrder(order, txn) => tryUpdate(order, txn)(queries)
+          case result => info"Order not updated due to: $result"
+        }
+      } yield ()
+    }
 
   private def tryUpdate(order: OrderRow, txn: TransactionRow)(queries: PreparedQueries[F]): F[Unit] =
     for {

@@ -1,15 +1,26 @@
 package com.example.stream
 
-import cats.implicits.catsSyntaxOptionId
-import cats.syntax.all.none
 import com.example.model.{OrderRow, TransactionRow}
 
 object OrderFsm {
 
-  def ifPositive(order: OrderRow): Option[OrderRow] =
-    if (order.filled > 0) order.some else none
+  sealed trait OrderProcessingResult
+  case object FilledOrder extends OrderProcessingResult
+  case object NonPositiveOrder extends OrderProcessingResult
+  case object SmallerOrder extends OrderProcessingResult
+  case class ProcessOrder(order: OrderRow, txn: TransactionRow) extends OrderProcessingResult
 
-  // todo: check negative amounts
-  def toTransaction(existing: OrderRow, updated: OrderRow): Option[TransactionRow] =
-    if (existing.filled != existing.total) TransactionRow(existing, updated).some else none
+  def check(existing: OrderRow, incoming: OrderRow): OrderProcessingResult = {
+    println(s"${existing.filled} -> ${incoming.filled}")
+    if (existing.filled == existing.total)
+      FilledOrder
+    else if (incoming.filled <= 0)
+      NonPositiveOrder
+    else if (existing.filled > incoming.filled)
+      SmallerOrder
+    else {
+      ProcessOrder(incoming, TransactionRow(existing, incoming))
+    }
+  }
+
 }
