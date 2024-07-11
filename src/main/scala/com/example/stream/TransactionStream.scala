@@ -1,18 +1,16 @@
 package com.example.stream
 
-import cats.effect.Deferred
-import cats.effect.std.MapRef
-import com.example.model.OrderId
 import cats.data.EitherT
-import cats.effect.implicits.monadCancelOps_
-import cats.effect.{Ref, Resource}
+import cats.effect.implicits._
+import cats.effect.{Deferred, Ref, Resource}
 import cats.effect.kernel.Async
-import cats.effect.std.Queue
-import fs2.{Pipe, Stream}
+import cats.effect.std.{MapRef, Queue}
+import fs2.Stream
 import org.typelevel.log4cats.Logger
 import cats.syntax.all._
-import com.example.model.{OrderRow, TransactionRow}
+import com.example.model.{OrderId, OrderRow, TransactionRow}
 import com.example.persistence.PreparedQueries
+import com.example.stream.OrderProcessor.ProcessingStrategy
 import org.typelevel.log4cats.syntax.LoggerInterpolator
 import skunk._
 
@@ -25,27 +23,13 @@ final class TransactionStream[F[_]](
   session: Resource[F, Session[F]],
   transactionCounter: Ref[F, Int], // updated if long IO succeeds
   stateManager: StateManager[F],    // utility for state management
-  mapRef: MapRef[F, OrderId, Option[Deferred[F, Unit]]],
-  maxConcurrent: Int = 10
+  processor: OrderProcessor[F]
 )(implicit F: Async[F], logger: Logger[F]) {
 
-  private val processConcurrently: Pipe[F, OrderRow, Unit] =
-    _.parEvalMapUnordered(maxConcurrent)(withRef)
-
-  val stream: Stream[F, Unit] =
-      Stream.fromQueueUnterminated(orders)
-        .through(processConcurrently)
-
-  private def withRef(order: OrderRow): F[Unit] =
-    for {
-      maybeLock <- mapRef(order.orderId).get
-      _ <- maybeLock.traverse_(_.get)
-      newLock <- Deferred[F, Unit]
-      _ <- mapRef.setKeyValue(order.orderId, newLock)
-      _ <- processUpdateWithCancellation(order)
-      _ <- newLock.complete(())
-      _ <- mapRef.unsetKey(order.orderId)
-    } yield ()
+  val stream: Stream[F, Unit] = processor.process(
+    Stream.fromQueueUnterminated(orders),
+    processUpdateWithCancellation
+  )
 
   // ensures the processing completes even if the fiber is canceled
   private def processUpdateWithCancellation(order: OrderRow): F[Unit] =
@@ -62,7 +46,7 @@ final class TransactionStream[F[_]](
           // Get current known order state
           state <- stateManager.getOrderState(updatedOrder.orderId, queries)
           _ <- OrderFsm.toTransaction(state, updatedOrder) match {
-            case Some(transaction) => tryUpdate(updatedOrder, transaction)(queries)
+            case Some(txn) => tryUpdate(updatedOrder, txn)(queries)
             case None => ().pure[F]
           }
         } yield ()
@@ -80,7 +64,6 @@ final class TransactionStream[F[_]](
               queries.xa.rollback(sp).void
           )
     } yield ()
-
 
   // represents some long running effect that can fail
   private def performLongRunningOperation(txn: TransactionRow): EitherT[F, Throwable, Unit] = {
@@ -102,27 +85,29 @@ final class TransactionStream[F[_]](
   def setSwitch(value: Boolean): F[Unit]                                          = stateManager.setSwitch(value)
   def addNewOrder(order: OrderRow, insert: PreparedCommand[F, OrderRow]): F[Unit] = stateManager.add(order, insert)
   // helper methods for testing
+
 }
 
 object TransactionStream {
 
   def apply[F[_]: Async: Logger](
     operationTimer: FiniteDuration,
-    session: Resource[F, Session[F]]
+    session: Resource[F, Session[F]],
+    strategy: ProcessingStrategy = ProcessingStrategy.Default
   ): Resource[F, TransactionStream[F]] = {
     Resource.eval {
       for {
         counter      <- Ref.of(0)
         queue        <- Queue.unbounded[F, OrderRow]
         stateManager <- StateManager.apply
-        mapRef <- MapRef.ofConcurrentHashMap[F, String, Deferred[F, Unit]]()
+        processor    <- OrderProcessor.of(strategy)
       } yield new TransactionStream[F](
         operationTimer,
         queue,
         session,
         counter,
         stateManager,
-        mapRef
+        processor
       )
     }
   }
