@@ -22,7 +22,7 @@ class TransactionStreamSpec extends FixtureAsyncWordSpec with BaseIOSpec with Op
 
     "processing orders" must {
 
-      "T1: process one updates resulting in one transaction" in { fxt =>
+      "T1: process one update resulting in one transaction" in { fxt =>
         val ts = Instant.now
         val order = OrderRow(
           orderId = "example_id",

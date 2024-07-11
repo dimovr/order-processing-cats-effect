@@ -9,6 +9,7 @@ import org.typelevel.log4cats.Logger
 import cats.syntax.all._
 import com.example.model.{OrderRow, TransactionRow}
 import com.example.persistence.PreparedQueries
+import org.typelevel.log4cats.syntax.LoggerInterpolator
 import skunk._
 
 import scala.concurrent.duration.FiniteDuration
@@ -39,35 +40,34 @@ final class TransactionStream[F[_]](
           // Get current known order state
           state <- stateManager.getOrderState(updatedOrder, queries)
           _ <- OrderFsm.toTransaction(state, updatedOrder) match {
-            case Some(transaction) =>
-              for {
-                _ <- queries.updateOrder.execute(updatedOrder.filled *: updatedOrder.orderId *: EmptyTuple)
-                // insert the transaction
-                _ <- queries.insertTransaction.execute(transaction)
-                _ <- performLongRunningOperation(transaction).value.void.handleErrorWith(th =>
-                  logger.error(th)(s"Got error when performing long running IO!")
-                )
-              } yield ()
+            case Some(transaction) => tryUpdate(updatedOrder, transaction)(queries)
             case None => ().pure[F]
           }
         } yield ()
       }
     case None => ().pure[F]
   }
-  // represents some long running IO that can fail
-  private def performLongRunningOperation(transaction: TransactionRow): EitherT[F, Throwable, Unit] = {
+
+  private def tryUpdate(order: OrderRow, txn: TransactionRow)(queries: PreparedQueries[F]): F[Unit] =
+    for {
+      _ <- queries.updateOrder.execute(order.filled *: order.orderId *: EmptyTuple)
+      _ <- queries.insertTransaction.execute(txn)
+      _ <- performLongRunningOperation(txn).value.void.handleErrorWith(
+            logger.error(_)(s"Got error when performing long running F!")
+          )
+    } yield ()
+
+
+  // represents some long running effect that can fail
+  private def performLongRunningOperation(txn: TransactionRow): EitherT[F, Throwable, Unit] = {
     EitherT.liftF[F, Throwable, Unit](
       F.sleep(operationTimer) *>
         stateManager.getSwitch.flatMap {
           case false =>
-            transactionCounter
-              .updateAndGet(_ + 1)
-              .flatMap(count =>
-                logger.info(
-                  s"Updated counter to $count by transaction with amount ${transaction.amount} for order ${transaction.orderId}!"
-                )
-              )
-          case true => F.raiseError(throw new Exception("Long running IO failed!"))
+            transactionCounter.updateAndGet(_ + 1).flatMap(count =>
+              info"Updated counter to $count by transaction with amount ${txn.amount} for order ${txn.orderId}!"
+            )
+          case true => F.raiseError(new Exception("Long running F failed!"))
         }
     )
   }
